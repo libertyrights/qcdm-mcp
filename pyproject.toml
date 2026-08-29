@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qcdm-mcp"
+version = "0.1.0"
+description = "MCP server for the Qualcomm DIAG/QCDM protocol over a serial diag port"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "GPL-3.0-or-later" }
+dependencies = [
+    "mcp",
+    "pyserial>=3.5",
+]
+
+[project.classifiers]
+"License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)"
+
+[tool.setuptools]
+py-modules = ["qcdm_mcp_server"]

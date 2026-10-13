@@ -581,6 +581,194 @@ def _with_diag(port: str, fn):
         d.close()
 
 
+def diag_list_ports() -> list:
+    """Enumerate serial ports the DIAG device may appear on."""
+    try:
+        _require()
+        return _list_ports()
+    except QcdmError as exc:
+        return [{"error": str(exc)}]
+
+
+def diag_version(port: str = "") -> dict:
+    """Read the modem version/build string via the DIAG version queries.
+
+    `port` is the serial port (\"COM3\", \"/dev/ttyUSB0\"). Leave empty
+    to auto-detect by probing enumerated ports.
+    """
+    try:
+        return _with_diag(port, lambda d: d.version())
+    except QcdmError as exc:
+        return {"error": str(exc)}
+
+
+def diag_nv_read(port: str = "", item_id: int = 0) -> dict:
+    """Read a single NV item (hex-encoded payload in the response).
+
+    `item_id` is the NV item number (e.g. IMEI / NV_UE_IMEI_I = 550).
+    """
+    try:
+        def do(d: DiagTransport):
+            return d.nv_read(item_id)
+        return _with_diag(port, do)
+    except QcdmError as exc:
+        return {"error": str(exc)}
+
+
+def diag_nv_write(port: str = "", item_id: int = 0, data: str = "",
+                  dry_run: bool = True, confirm: bool = False) -> dict:
+    """Write a single NV item (MODEM-WRITING; guarded).
+
+    WARNING: writing NV items can corrupt the modem or brick it. Only
+    write values you fully understand, and back up NV first.
+
+    Refuses to open the serial port unless BOTH ``dry_run=False`` AND
+    ``confirm=True`` are passed; with the defaults it returns a dry-run
+    payload describing what it *would* write and touches nothing.
+
+    `data` is a hex string, e.g. \"01020304050607\".
+    """
+    would_do = {"port": port, "item_id": item_id, "data": data}
+    if dry_run or not confirm:
+        return {"dry_run": True, "executed": False, "would_do": would_do,
+                "message": ("DRY RUN \u2014 nothing written; set dry_run=False "
+                            "and confirm=True to proceed.")}
+    try:
+        raw = bytes.fromhex(data)
+    except ValueError as exc:
+        return {"error": "data must be a valid hex string: %s" % exc}
+    try:
+        def do(d: DiagTransport):
+            return d.nv_write(item_id, raw)
+        return _with_diag(port, do)
+    except QcdmError as exc:
+        return {"error": str(exc)}
+
+
+def diag_memory_peek(port: str = "", address: int = 0, length: int = 16) -> dict:
+    """Read modem memory (hex string out). Peek reads bytes via DIAG_PEEKB_F.
+
+    Memory access is restricted or disabled on most modern devices, and
+    reads at bad addresses can crash some modems.
+    """
+    try:
+        def do(d: DiagTransport):
+            return d.memory_peek(address, length)
+        return _with_diag(port, do)
+    except QcdmError as exc:
+        return {"error": str(exc)}
+
+
+def diag_memory_poke(port: str = "", address: int = 0, data: str = "",
+                     dry_run: bool = True, confirm: bool = False) -> dict:
+    """Write modem memory (DIAG_POKEB_F) (MODEM-WRITING; guarded).
+
+    WARNING: poking modem memory can crash or permanently brick the
+    device. Envelope layout is inferred, unverified on hardware.
+
+    Refuses to open the serial port unless BOTH ``dry_run=False`` AND
+    ``confirm=True`` are passed; with the defaults it returns a dry-run
+    payload describing what it *would* write and touches nothing.
+
+    `data` is a hex string.
+    """
+    would_do = {"port": port, "address": address, "data": data}
+    if dry_run or not confirm:
+        return {"dry_run": True, "executed": False, "would_do": would_do,
+                "message": ("DRY RUN \u2014 nothing written; set dry_run=False "
+                            "and confirm=True to proceed.")}
+    try:
+        raw = bytes.fromhex(data)
+    except ValueError as exc:
+        return {"error": "data must be a valid hex string: %s" % exc}
+    try:
+        def do(d: DiagTransport):
+            return d.memory_poke(address, raw)
+        return _with_diag(port, do)
+    except QcdmError as exc:
+        return {"error": str(exc)}
+
+
+def diag_efs_list(port: str = "", path: str = "/") -> dict:
+    """List the entries of an EFS2 directory (e.g. \"/policyman\")."""
+    try:
+        def do(d: DiagTransport):
+            d._efs_hello()
+            return d.efs_list(path)
+        return _with_diag(port, do)
+    except QcdmError as exc:
+        return {"error": str(exc)}
+
+
+def diag_efs_pull(port: str = "", remote_path: str = "",
+                  local_path: str = "") -> dict:
+    """Copy a modem EFS file to the host."""
+    try:
+        if not remote_path or not local_path:
+            return {"error": "remote_path and local_path are required"}
+        def do(d: DiagTransport):
+            d._efs_hello()
+            data = d.efs_read_file(remote_path)
+            with open(local_path, "wb") as fh:
+                fh.write(data)
+            return {"remote_path": remote_path,
+                    "local_path": local_path, "size": len(data)}
+        return _with_diag(port, do)
+    except OSError as exc:
+        return {"error": "local file error: %s" % exc}
+    except QcdmError as exc:
+        return {"error": str(exc)}
+
+
+def diag_efs_push(port: str = "", local_path: str = "",
+                  remote_path: str = "", dry_run: bool = True,
+                  confirm: bool = False) -> dict:
+    """Push a host file into the modem EFS, then verify the read-back.
+
+    WARNING: writing the wrong modem EFS file can stop the modem from
+    booting or registering. Always pull/back up before pushing.
+
+    Refuses to open the serial port unless BOTH ``dry_run=False`` AND
+    ``confirm=True`` are passed; with the defaults it returns a dry-run
+    payload describing what it *would* write and touches nothing.
+    """
+    would_do = {"port": port, "local_path": local_path,
+                "remote_path": remote_path}
+    if dry_run or not confirm:
+        return {"dry_run": True, "executed": False, "would_do": would_do,
+                "message": ("DRY RUN \u2014 nothing written; set dry_run=False "
+                            "and confirm=True to proceed.")}
+    try:
+        if not remote_path or not local_path:
+            return {"error": "local_path and remote_path are required"}
+        with open(local_path, "rb") as fh:
+            blob = fh.read()
+        def do(d: DiagTransport):
+            d._efs_hello()
+            n = d.efs_write_file(remote_path, blob)
+            verified = d.efs_read_file(remote_path) == blob
+            return {"local_path": local_path, "remote_path": remote_path,
+                    "written": n, "read_back_matches": verified}
+        return _with_diag(port, do)
+    except OSError as exc:
+        return {"error": "local file error: %s" % exc}
+    except QcdmError as exc:
+        return {"error": str(exc)}
+
+
+TOOLS = (
+    diag_list_ports,
+    diag_version,
+    diag_nv_read,
+    diag_nv_write,
+    diag_memory_peek,
+    diag_memory_poke,
+    diag_efs_list,
+    diag_efs_pull,
+    diag_efs_push,
+)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     if FastMCP is None:
@@ -589,149 +777,10 @@ def main() -> None:
 
     mcp = FastMCP("qcdm-mcp")
 
-    @mcp.tool()
-    def diag_list_ports() -> list:
-        """Enumerate serial ports the DIAG device may appear on."""
-        try:
-            _require()
-            return _list_ports()
-        except QcdmError as exc:
-            return [{"error": str(exc)}]
-
-    @mcp.tool()
-    def diag_version(port: str = "") -> dict:
-        """Read the modem version/build string via the DIAG version queries.
-
-        `port` is the serial port (\"COM3\", \"/dev/ttyUSB0\"). Leave empty
-        to auto-detect by probing enumerated ports.
-        """
-        try:
-            return _with_diag(port, lambda d: d.version())
-        except QcdmError as exc:
-            return {"error": str(exc)}
-
-    @mcp.tool()
-    def diag_nv_read(port: str = "", item_id: int = 0) -> dict:
-        """Read a single NV item (hex-encoded payload in the response).
-
-        `item_id` is the NV item number (e.g. IMEI / NV_UE_IMEI_I = 550).
-        """
-        try:
-            def do(d: DiagTransport):
-                return d.nv_read(item_id)
-            return _with_diag(port, do)
-        except QcdmError as exc:
-            return {"error": str(exc)}
-
-    @mcp.tool()
-    def diag_nv_write(port: str = "", item_id: int = 0, data: str = "") -> dict:
-        """Write a single NV item.
-
-        WARNING: writing NV items can corrupt the modem or brick it. Only
-        write values you fully understand, and back up NV first.
-
-        `data` is a hex string, e.g. \"01020304050607\".
-        """
-        try:
-            raw = bytes.fromhex(data)
-        except ValueError as exc:
-            return {"error": "data must be a valid hex string: %s" % exc}
-        try:
-            def do(d: DiagTransport):
-                return d.nv_write(item_id, raw)
-            return _with_diag(port, do)
-        except QcdmError as exc:
-            return {"error": str(exc)}
-
-    @mcp.tool()
-    def diag_memory_peek(port: str = "", address: int = 0, length: int = 16) -> dict:
-        """Read modem memory (hex string out). Peek reads bytes via DIAG_PEEKB_F.
-
-        Memory access is restricted or disabled on most modern devices, and
-        reads at bad addresses can crash some modems.
-        """
-        try:
-            def do(d: DiagTransport):
-                return d.memory_peek(address, length)
-            return _with_diag(port, do)
-        except QcdmError as exc:
-            return {"error": str(exc)}
-
-    @mcp.tool()
-    def diag_memory_poke(port: str = "", address: int = 0, data: str = "") -> dict:
-        """Write modem memory (DIAG_POKEB_F).
-
-        WARNING: poking modem memory can crash or permanently brick the
-        device. Envelope layout is inferred, unverified on hardware.
-
-        `data` is a hex string.
-        """
-        try:
-            raw = bytes.fromhex(data)
-        except ValueError as exc:
-            return {"error": "data must be a valid hex string: %s" % exc}
-        try:
-            def do(d: DiagTransport):
-                return d.memory_poke(address, raw)
-            return _with_diag(port, do)
-        except QcdmError as exc:
-            return {"error": str(exc)}
-
-    @mcp.tool()
-    def diag_efs_list(port: str = "", path: str = "/") -> dict:
-        """List the entries of an EFS2 directory (e.g. \"/policyman\")."""
-        try:
-            def do(d: DiagTransport):
-                d._efs_hello()
-                return d.efs_list(path)
-            return _with_diag(port, do)
-        except QcdmError as exc:
-            return {"error": str(exc)}
-
-    @mcp.tool()
-    def diag_efs_pull(port: str = "", remote_path: str = "",
-                      local_path: str = "") -> dict:
-        """Copy a modem EFS file to the host."""
-        try:
-            if not remote_path or not local_path:
-                return {"error": "remote_path and local_path are required"}
-            def do(d: DiagTransport):
-                d._efs_hello()
-                data = d.efs_read_file(remote_path)
-                with open(local_path, "wb") as fh:
-                    fh.write(data)
-                return {"remote_path": remote_path,
-                        "local_path": local_path, "size": len(data)}
-            return _with_diag(port, do)
-        except OSError as exc:
-            return {"error": "local file error: %s" % exc}
-        except QcdmError as exc:
-            return {"error": str(exc)}
-
-    @mcp.tool()
-    def diag_efs_push(port: str = "", local_path: str = "",
-                      remote_path: str = "") -> dict:
-        """Push a host file into the modem EFS, then verify the read-back.
-
-        WARNING: writing the wrong modem EFS file can stop the modem from
-        booting or registering. Always pull/back up before pushing.
-        """
-        try:
-            if not remote_path or not local_path:
-                return {"error": "local_path and remote_path are required"}
-            with open(local_path, "rb") as fh:
-                blob = fh.read()
-            def do(d: DiagTransport):
-                d._efs_hello()
-                n = d.efs_write_file(remote_path, blob)
-                verified = d.efs_read_file(remote_path) == blob
-                return {"local_path": local_path, "remote_path": remote_path,
-                        "written": n, "read_back_matches": verified}
-            return _with_diag(port, do)
-        except OSError as exc:
-            return {"error": "local file error: %s" % exc}
-        except QcdmError as exc:
-            return {"error": str(exc)}
+    # Tools are defined at module level (so they are unit-testable) and
+    # registered here with the FastMCP decorator factory.
+    for tool in TOOLS:
+        mcp.tool()(tool)
 
     mcp.run()
 
